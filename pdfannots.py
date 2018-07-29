@@ -11,9 +11,10 @@ from pdfminer.pdfparser import PDFParser
 from pdfminer.pdfdocument import PDFDocument, PDFNoOutlines
 from pdfminer.psparser import PSLiteralTable, PSLiteral
 import pdfminer.pdftypes as pdftypes
-import pdfminer.settings
+# import pdfminer.settings
 
-pdfminer.settings.STRICT = False
+# pdfminer.settings.STRICT = False
+import re
 
 SUBSTITUTIONS = {
     u'ﬀ': 'ff',
@@ -135,21 +136,36 @@ class Annotation:
             return None
         return (min(x0, x1), max(y0, y1)) # assume left-to-right top-to-bottom text :)
 
-def getannots(pdfannots, pageno):
+def getannots(pdfannots, pageno, linesperpage=20,pagew=815,pageh=600):
     annots = []
+    linenos=''
     for pa in pdfannots:
         subtype = pa.get('Subtype')
-        if subtype is not None and subtype.name not in ANNOT_SUBTYPES:
-            continue
+        if subtype.name=='Highlight':
+            # print(subtype.name)
+            if subtype is not None and subtype.name not in ANNOT_SUBTYPES:
+                continue
 
-        contents = pa.get('Contents')
-        if contents is not None:
-            contents = str(contents, 'iso8859-15') #'utf-8'
-            contents = contents.replace('\r\n', '\n').replace('\r', '\n')
-        a = Annotation(pageno, subtype.name.lower(), pa.get('QuadPoints'), pa.get('Rect'), contents)
-        annots.append(a)
-
-    return annots
+            contents = pa.get('Contents')
+            if contents is not None:
+                contents = str(contents).decode('iso8859-15')#'iso8859-15') #'utf-8'            
+                contents = contents.replace('\r\n', '\n').replace('\r', '\n')
+                contents = contents[2:]
+                # print(contents.decode('iso8859-15'))
+                # contents = contents.replace('þÿ', '')
+                # contents = re.sub(r'[^\w]',' ',contents)
+            # print(pa['Rect']) # xmin ymin xmax ymax
+            xmin, ymin, xmax, ymax = pa['Rect']
+            lineini=int((1-ymax/float(pagew))*20)
+            lineend=int((1-ymin/float(pagew))*20)
+            linenos="line {} to {}".format(lineini, lineend)
+            # print(linenos,ymin,ymax)
+            a = Annotation(pageno, subtype.name.lower(), pa.get('QuadPoints'), pa.get('Rect'), contents)
+            annots.append(a)
+    # if linenos=='':
+    #     print(subtype.name)
+    #     print(pa['Rect']) # xmin ymin xmax ymax        
+    return annots,linenos
 
 def normalise_to_box(pos, box):
     (x, y) = pos
@@ -186,7 +202,7 @@ def nearest_outline(outlines, pageno, mediabox, pos):
     return prev
 
 
-def prettyprint(annots, outlines, mediaboxes):
+def prettyprint(annots, outlines, mediaboxes,alllinenos):
 
     tw = textwrap.TextWrapper(width=80, initial_indent=" * ", subsequent_indent="   ")
 
@@ -210,23 +226,24 @@ def prettyprint(annots, outlines, mediaboxes):
         else:
             return ''
 
+    def formatitem(*args):
+        msg = '- '+'\n'.join(args)
+        # print(tw.fill(msg) + "\n")
+        return msg + "\n"
     def printitem(*args):
-        msg = ' '.join(args)
-        print(tw.fill(msg) + "\n")
+        print(formatitem(*args))
 
     nits = [a for a in annots if a.tagname in ['squiggly', 'strikeout', 'underline']]
-    comments = [a for a in annots if a.tagname in ['highlight', 'text'] and a.contents]
+    comments = [a for a in annots if a.tagname in ['highlight'] and a.contents]
+    # commentslinenos = [alllinenos[ai] for ai,a in enumerate(annots) if a.tagname in ['highlight', 'text'] and a.contents]    
     highlights = [a for a in annots if a.tagname == 'highlight' and a.contents is None]
-
-    if highlights:
-        print("## Highlights\n")
-        for a in highlights:
-            printitem(fmtpos(a), fmttext(a))
-
+    # print(alllinenos)
+    allcomments=[]
     if comments:
-        if highlights:
-            print() # blank
-        print("## Detailed comments\n")
+        # if highlights:
+        #     print() # blank
+        # print("# All comments\n")
+        commenti=0
         for a in comments:
             text = fmttext(a)
             if text:
@@ -235,9 +252,48 @@ def prettyprint(annots, outlines, mediaboxes):
                 firstword = contents.split()[0]
                 if firstword != 'I' and not firstword.startswith("I'"):
                     contents = contents[0].lower() + contents[1:]
-                printitem(fmtpos(a), "Regarding", text + ",", contents)
-            else:
-                printitem(fmtpos(a), a.contents)
+                # printitem(fmtpos(a), alllinenos[commenti] if commenti<len(alllinenos) else '', "Regarding", text + ",", contents)
+                # printitem(fmtpos(a), "Regarding "+text, contents)
+                allcomments.append(formatitem(fmtpos(a), "Regarding "+text, contents))
+                commenti+=1
+            # else:
+            #     printitem(fmtpos(a), a.contents)
+    hashtag2category={'#major':'# Major comments:\n',
+    '#minor':'# Minor comments:\n',
+    '#checkinabstract': '#checkinabstract\n',
+    '#checkinresults':'#checkinresults\n',
+    '#checkindiscussion':'#checkindiscussion\n',
+    '#checkinmethods':'#checkinmethods\n',
+    '#checkinrefs':'#checkinrefs\n',
+    '#checkout':'#checkout\n',}
+    for ctype in ['#major','#minor']:
+        print(hashtag2category[ctype]) 
+        for c in allcomments:
+            if not '#check' in c:
+                if ctype in c:
+                    print(c.replace(ctype,'')) 
+
+    for ctype in [k for k in hashtag2category.keys() if '#check' in k]:
+        ci=0
+        for c in allcomments:
+            if '#check' in c:
+                if ci==0:
+                    print(hashtag2category[ctype]) 
+                print(c)
+                ci+=1
+
+    ci=0
+    for c in allcomments:
+        if not '#' in c:
+            if ci==0:
+                print('# Not hashtagged comments:') 
+            print(c)
+            ci+=1
+
+    if highlights:
+        print("## Just Highlights\n")
+        for a in highlights:
+            printitem(fmtpos(a), fmttext(a))
 
     if nits:
         if highlights or comments:
@@ -295,7 +351,7 @@ def printannots(fh):
     pagesdict = {}
     mediaboxes = {}
     allannots = []
-
+    alllinenos=[]
     for (pageno, page) in enumerate(PDFPage.create_pages(doc)):
         pagesdict[page.pageid] = pageno
         mediaboxes[pageno] = page.mediabox
@@ -309,13 +365,16 @@ def printannots(fh):
         pdfannots = []
         for a in pdftypes.resolve1(page.annots):
             if isinstance(a, pdftypes.PDFObjRef):
+                # print(a.resolve())
                 pdfannots.append(a.resolve())
             else:
                 sys.stderr.write('Warning: unknown annotation: %s\n' % a)
 
-        pageannots = getannots(pdfannots, pageno)
+        pageannots,linenos = getannots(pdfannots, pageno)
+        alllinenos.append(linenos)
         device.setcoords(pageannots)
         interpreter.process_page(page)
+        # print(pageannots)
         allannots.extend(pageannots)
 
     sys.stderr.write("\n")
@@ -324,14 +383,14 @@ def printannots(fh):
     try:
         outlines = get_outlines(doc, pagesdict)
     except PDFNoOutlines:
-        sys.stderr.write("Document doesn't include outlines (\"bookmarks\")\n")
+        sys.stderr.write("Document doesn't include outlines (\"bookmarks\")\n\n\n")
     except:
         e = sys.exc_info()[0]
-        sys.stderr.write("Warning: failed to retrieve outlines: %s\n" % e)
+        sys.stderr.write("Warning: failed to retrieve outlines: %s\n\n\n" % e)
 
     device.close()
 
-    prettyprint(allannots, outlines, mediaboxes)
+    prettyprint(allannots, outlines, mediaboxes,alllinenos)
 
 def main():
     if len(sys.argv) != 2:
